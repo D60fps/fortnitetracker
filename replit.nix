@@ -1,0 +1,11 @@
+{ pkgs }: {
+  deps = [
+    pkgs.python311
+    pkgs.python311Packages.pip
+    pkgs.gunicorn
+  ];
+  
+  env = {
+    PYTHONPATH = "/home/runner/${project.name}/site-packages";
+  };
+}
