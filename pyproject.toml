@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "ippuller"
+version = "1.0.0"
+description = "IP Puller Flask App"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+Flask = "2.3.3"
+requests = "2.31.0"
+gunicorn = "21.2.0"
+ipaddress = "1.0.23"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
